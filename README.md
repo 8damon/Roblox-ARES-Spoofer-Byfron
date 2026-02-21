@@ -1,9 +1,14 @@
-# **ARES-RS** (Roblox)
+<h1 align="center">ARES-RS</h1>
+<p align="center"><b>Roblox Spoofer</b></p>
 
-![Rust](https://img.shields.io/badge/language-Rust-orange?logo=rust)
-[![CI](https://github.com/8damon/Roblox-ARES-Spoofer-Byfron/actions/workflows/ci.yml/badge.svg)](https://github.com/8damon/Roblox-ARES-Spoofer-Byfron/actions/workflows/ci.yml)
-![Downloads](https://img.shields.io/badge/Downloads-4K%2B-green)
-[![Discord](https://img.shields.io/discord/1240608336005828668?label=TITAN%20Softworks&logo=discord&color=5865F2&style=flat)](https://discord.gg/yUWyvT9JyP)
+<p align="center">
+  <img src="https://img.shields.io/badge/language-Rust-orange?logo=rust&style=for-the-badge" />
+  <img src="https://img.shields.io/github/actions/workflow/status/8damon/Roblox-ARES-Spoofer-Byfron/ci.yml?label=CI&style=for-the-badge" />
+  <img src="https://img.shields.io/badge/Downloads-4K%2B-green?style=for-the-badge" />
+  <a href="https://discord.gg/yUWyvT9JyP">
+    <img src="https://img.shields.io/discord/1240608336005828668?label=TITAN%20Softworks&logo=discord&color=5865F2&style=for-the-badge" />
+  </a>
+</p>
 
 ## INTRODUCTION
 
