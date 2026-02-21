@@ -163,7 +163,7 @@ For DLL integration docs (exports, structs, callback usage, and call flow), see:
 
 ## SUPPORT
 
-The Spoofer provides logs at ``%LOCALAPPDATA%\aresrs``, filter by modified-date & upload the relevant log file to said thread,
+The Spoofer provides logs at ``%LOCALAPPDATA%\TSRS``, filter by modified-date & upload the relevant log file to said thread,
 
 Open a support thread via the **[TITAN Discord](https://hub.titansoftwork.com)**.
 
