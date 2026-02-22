@@ -2,18 +2,30 @@ use sha2::Digest;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::info;
+use tracing::{error, info};
 use tracing_subscriber::fmt::time::ChronoLocal;
 use tracing_subscriber::fmt::writer::MakeWriter;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, fmt};
-use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_NOT_ALL_ASSIGNED, ERROR_SUCCESS, GetLastError, LUID, SetLastError,
+    WIN32_ERROR,
+};
+use windows::Win32::Security::{
+    AdjustTokenPrivileges, GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
+    LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES,
+    TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_QUERY,
+    TokenElevation, TokenElevationType, TokenElevationTypeDefault, TokenElevationTypeFull,
+    TokenElevationTypeLimited, TokenIntegrityLevel, TokenPrivileges,
+};
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY, REG_DWORD,
     REG_EXPAND_SZ, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
 };
+use windows::Win32::System::SystemInformation::{GetLocalTime, GetSystemTime};
+use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::UI::Shell::{
     QUNS_ACCEPTS_NOTIFICATIONS, QUNS_APP, QUNS_BUSY, QUNS_NOT_PRESENT, QUNS_PRESENTATION_MODE,
     QUNS_QUIET_TIME, QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState,
@@ -45,6 +57,7 @@ struct ConsoleWriter {
 
 static MUTE_CONSOLE_TRACING: AtomicBool = AtomicBool::new(false);
 static CONSOLE_ANSI_TRACING: AtomicBool = AtomicBool::new(true);
+static PANIC_HOOK_INSTALLED: Once = Once::new();
 
 pub fn ArSetConsoleTracingMuted(muted: bool) {
     MUTE_CONSOLE_TRACING.store(muted, Ordering::Relaxed);
@@ -174,7 +187,7 @@ pub fn ArTracing() {
                 .with_target(true)
                 .with_file(false)
                 .with_line_number(false)
-                .with_thread_ids(true)
+                .with_thread_ids(false)
                 .with_thread_names(true)
                 .with_level(true)
                 .with_timer(timer)
@@ -190,7 +203,7 @@ pub fn ArTracing() {
                 .with_target(true)
                 .with_file(true)
                 .with_line_number(true)
-                .with_thread_ids(true)
+                .with_thread_ids(false)
                 .with_thread_names(true)
                 .with_level(true)
                 .with_timer(timer.clone())
@@ -202,7 +215,7 @@ pub fn ArTracing() {
                 .with_target(true)
                 .with_file(false)
                 .with_line_number(false)
-                .with_thread_ids(true)
+                .with_thread_ids(false)
                 .with_thread_names(true)
                 .with_level(true)
                 .with_timer(timer)
@@ -222,7 +235,7 @@ pub fn ArTracing() {
             .with_target(true)
             .with_file(true)
             .with_line_number(true)
-            .with_thread_ids(true)
+            .with_thread_ids(false)
             .with_thread_names(true)
             .with_level(true)
             .with_timer(timer)
@@ -236,6 +249,7 @@ pub fn ArTracing() {
             .init();
     }
 
+    ArInstallPanicHook();
     ArLogStartupDiagnostics();
 }
 
@@ -254,6 +268,379 @@ unsafe extern "system" {
     fn RtlGetVersion(lpVersionInformation: *mut RTL_OSVERSIONINFOW) -> i32;
 }
 
+struct WindowsSupportStatus {
+    state: &'static str,
+    note: &'static str,
+}
+
+struct SecurityContext {
+    process_elevation_level: String,
+    integrity_level: String,
+    se_debug_privilege: String,
+}
+
+fn ArInstallPanicHook() {
+    PANIC_HOOK_INSTALLED.call_once(|| {
+        std::panic::set_hook(Box::new(|panic_info| {
+            let thread_name = std::thread::current()
+                .name()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "unnamed".to_string());
+
+            let location = panic_info
+                .location()
+                .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()))
+                .unwrap_or_else(|| "unknown".to_string());
+
+            let payload = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "non-string panic payload".to_string()
+            };
+
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            error!(
+                thread = %thread_name,
+                location = %location,
+                message = %payload,
+                backtrace = %backtrace,
+                "Unhandled panic captured"
+            );
+        }));
+    });
+}
+
+fn classify_windows_support(major: u32, build: u32) -> WindowsSupportStatus {
+    if major < 10 {
+        return WindowsSupportStatus {
+            state: "eol",
+            note: "Windows versions before 10 are out of support.",
+        };
+    }
+
+    if build < 19_045 {
+        return WindowsSupportStatus {
+            state: "eol",
+            note: "Windows 10 builds before 22H2 are out of support.",
+        };
+    }
+
+    if build < 22_000 {
+        return WindowsSupportStatus {
+            state: "eol",
+            note: "Windows 10 22H2 reached mainstream end of support on 2025-10-14.",
+        };
+    }
+
+    if build < 22_621 {
+        return WindowsSupportStatus {
+            state: "eol",
+            note: "Windows 11 21H2 is out of support.",
+        };
+    }
+
+    if build < 26_100 {
+        return WindowsSupportStatus {
+            state: "check-edition",
+            note: "Windows 11 22H2/23H2 support depends on edition and servicing channel.",
+        };
+    }
+
+    WindowsSupportStatus {
+        state: "supported",
+        note: "Windows 11 24H2+ baseline appears supported.",
+    }
+}
+
+fn query_system_datetimes() -> (String, String) {
+    unsafe {
+        let local = GetLocalTime();
+        let utc = GetSystemTime();
+        (format_systemtime(local), format_systemtime(utc))
+    }
+}
+
+fn format_systemtime(st: windows::Win32::Foundation::SYSTEMTIME) -> String {
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds
+    )
+}
+
+fn query_security_context() -> SecurityContext {
+    unsafe {
+        let mut token = windows::Win32::Foundation::HANDLE::default();
+        let can_adjust_privileges = if OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES,
+            &mut token,
+        )
+        .is_ok()
+        {
+            true
+        } else if let Err(e) = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) {
+            let err = format!("open_process_token_failed({e})");
+            return SecurityContext {
+                process_elevation_level: err.clone(),
+                integrity_level: err.clone(),
+                se_debug_privilege: err,
+            };
+        } else {
+            false
+        };
+
+        let process_elevation_level = query_process_elevation_level(token)
+            .unwrap_or_else(|| "unknown".to_string());
+        let integrity_level = query_integrity_level(token).unwrap_or_else(|| "unknown".to_string());
+        let se_debug_privilege = query_se_debug_privilege_level(token, can_adjust_privileges)
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let _ = CloseHandle(token);
+
+        SecurityContext {
+            process_elevation_level,
+            integrity_level,
+            se_debug_privilege,
+        }
+    }
+}
+
+fn query_process_elevation_level(token: windows::Win32::Foundation::HANDLE) -> Option<String> {
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut out_len = 0u32;
+    if unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevation,
+            Some((&mut elevation as *mut TOKEN_ELEVATION).cast()),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut out_len,
+        )
+    }
+    .is_err()
+    {
+        return None;
+    }
+
+    let mut elevation_type = TOKEN_ELEVATION_TYPE(0);
+    let mut type_len = 0u32;
+    let type_label = if unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevationType,
+            Some((&mut elevation_type as *mut TOKEN_ELEVATION_TYPE).cast()),
+            std::mem::size_of::<TOKEN_ELEVATION_TYPE>() as u32,
+            &mut type_len,
+        )
+    }
+    .is_ok()
+    {
+        if elevation_type == TokenElevationTypeFull {
+            "full"
+        } else if elevation_type == TokenElevationTypeLimited {
+            "limited"
+        } else if elevation_type == TokenElevationTypeDefault {
+            "default"
+        } else {
+            "unknown"
+        }
+    } else {
+        "unknown"
+    };
+
+    Some(format!(
+        "{type_label} (token_is_elevated={})",
+        elevation.TokenIsElevated != 0
+    ))
+}
+
+fn query_integrity_level(token: windows::Win32::Foundation::HANDLE) -> Option<String> {
+    let mut buf = vec![0u8; 256];
+    let mut out_len = 0u32;
+
+    let first = unsafe {
+        GetTokenInformation(
+            token,
+            TokenIntegrityLevel,
+            Some(buf.as_mut_ptr().cast()),
+            buf.len() as u32,
+            &mut out_len,
+        )
+    };
+    if first.is_err() && out_len as usize > buf.len() {
+        buf.resize(out_len as usize, 0);
+        unsafe {
+            GetTokenInformation(
+                token,
+                TokenIntegrityLevel,
+                Some(buf.as_mut_ptr().cast()),
+                buf.len() as u32,
+                &mut out_len,
+            )
+        }
+        .ok()?;
+    } else {
+        first.ok()?;
+    }
+
+    if out_len < std::mem::size_of::<TOKEN_MANDATORY_LABEL>() as u32 {
+        return None;
+    }
+
+    let label = unsafe { &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL) };
+    let sid = label.Label.Sid;
+    if sid.is_invalid() {
+        return None;
+    }
+
+    let count_ptr = unsafe { GetSidSubAuthorityCount(sid) };
+    if count_ptr.is_null() || unsafe { *count_ptr } == 0 {
+        return None;
+    }
+
+    let rid_ptr = unsafe { GetSidSubAuthority(sid, (*count_ptr as u32) - 1) };
+    if rid_ptr.is_null() {
+        return None;
+    }
+    let rid = unsafe { *rid_ptr };
+
+    let label = if rid >= 0x0000_5000 {
+        "system"
+    } else if rid >= 0x0000_4000 {
+        "high"
+    } else if rid >= 0x0000_3000 {
+        "medium-plus"
+    } else if rid >= 0x0000_2000 {
+        "medium"
+    } else if rid >= 0x0000_1000 {
+        "low"
+    } else {
+        "untrusted"
+    };
+
+    Some(format!("{label} (rid=0x{rid:04x})"))
+}
+
+fn query_se_debug_privilege_level(
+    token: windows::Win32::Foundation::HANDLE,
+    can_adjust_privileges: bool,
+) -> Option<String> {
+    let mut se_debug_luid = LUID::default();
+    let name_w: Vec<u16> = "SeDebugPrivilege".encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        LookupPrivilegeValueW(PCWSTR::null(), PCWSTR(name_w.as_ptr()), &mut se_debug_luid).ok()?;
+    }
+
+    let before = query_token_privileges(token, se_debug_luid)?;
+    if before.present && before.enabled {
+        return Some("enabled (already enabled)".to_string());
+    }
+    if !before.present {
+        return Some("not present on token".to_string());
+    }
+    if !can_adjust_privileges {
+        return Some("present but disabled (TOKEN_ADJUST_PRIVILEGES unavailable)".to_string());
+    }
+
+    let mut new_state = TOKEN_PRIVILEGES {
+        PrivilegeCount: 1,
+        Privileges: [LUID_AND_ATTRIBUTES {
+            Luid: se_debug_luid,
+            Attributes: SE_PRIVILEGE_ENABLED,
+        }],
+    };
+
+    unsafe {
+        SetLastError(WIN32_ERROR(0));
+    }
+    let adjust_result = unsafe {
+        AdjustTokenPrivileges(
+            token,
+            false,
+            Some((&mut new_state as *mut TOKEN_PRIVILEGES).cast_const()),
+            0,
+            None,
+            None,
+        )
+    };
+
+    let adjust_err = unsafe { GetLastError() };
+    if adjust_result.is_err() {
+        return Some(format!("enable_failed(api_error={})", adjust_result.err()?.code()));
+    }
+    if adjust_err == ERROR_NOT_ALL_ASSIGNED {
+        return Some("present but not assignable (ERROR_NOT_ALL_ASSIGNED)".to_string());
+    }
+
+    let after = query_token_privileges(token, se_debug_luid)?;
+    if after.enabled {
+        Some("enabled (set during preflight)".to_string())
+    } else {
+        Some("present but disabled".to_string())
+    }
+}
+
+struct TokenPrivilegeState {
+    present: bool,
+    enabled: bool,
+}
+
+fn query_token_privileges(
+    token: windows::Win32::Foundation::HANDLE,
+    privilege_luid: LUID,
+) -> Option<TokenPrivilegeState> {
+    let mut buf = vec![0u8; 2048];
+    let mut out_len = 0u32;
+
+    let first = unsafe {
+        GetTokenInformation(
+            token,
+            TokenPrivileges,
+            Some(buf.as_mut_ptr().cast()),
+            buf.len() as u32,
+            &mut out_len,
+        )
+    };
+    if first.is_err() && out_len as usize > buf.len() {
+        buf.resize(out_len as usize, 0);
+        unsafe {
+            GetTokenInformation(
+                token,
+                TokenPrivileges,
+                Some(buf.as_mut_ptr().cast()),
+                buf.len() as u32,
+                &mut out_len,
+            )
+        }
+        .ok()?;
+    } else {
+        first.ok()?;
+    }
+
+    if out_len < std::mem::size_of::<TOKEN_PRIVILEGES>() as u32 {
+        return None;
+    }
+
+    let privileges = unsafe { &*(buf.as_ptr() as *const TOKEN_PRIVILEGES) };
+    let count = privileges.PrivilegeCount as usize;
+    let first_entry = privileges.Privileges.as_ptr();
+
+    let mut present = false;
+    let mut enabled = false;
+    for i in 0..count {
+        let entry = unsafe { *first_entry.add(i) };
+        if entry.Luid == privilege_luid {
+            present = true;
+            enabled = entry.Attributes.contains(SE_PRIVILEGE_ENABLED);
+            break;
+        }
+    }
+
+    Some(TokenPrivilegeState { present, enabled })
+}
+
 fn ArLogStartupDiagnostics() {
     let (major, minor, build) = query_windows_version().unwrap_or((0, 0, 0));
     let os_family = if build >= 22_000 {
@@ -261,6 +648,9 @@ fn ArLogStartupDiagnostics() {
     } else {
         "Windows 10/legacy"
     };
+    let support = classify_windows_support(major, build);
+    let (local_time, utc_time) = query_system_datetimes();
+    let security_context = query_security_context();
 
     let cpu_vendor = query_cpu_vendor();
     let cpu_class = if cpu_vendor.contains("AuthenticAMD") {
@@ -284,16 +674,12 @@ fn ArLogStartupDiagnostics() {
         compute_current_process_sha256_with_timeout().unwrap_or_else(|| "unavailable".to_string());
 
     info!(
-        os_major = major,
-        os_minor = minor,
-        os_build = build,
-        os_family,
-        security_intelligence = %security_intelligence,
-        do_not_disturb = dnd_status,
-        cpu_vendor = %cpu_vendor,
-        cpu_class,
-        process_sha256 = %sha256,
-        "Startup diagnostics preflight"
+        "Startup diagnostics preflight\n  os_major={major}\n  os_minor={minor}\n  os_build={build}\n  os_family={os_family}\n  os_support_state={}\n  os_support_note={}\n  local_datetime={local_time}\n  utc_datetime={utc_time}\n  process_elevation_level={}\n  integrity_level={}\n  se_debug_privilege={}\n  security_intelligence={security_intelligence}\n  do_not_disturb={dnd_status}\n  cpu_vendor={cpu_vendor}\n  cpu_class={cpu_class}\n  process_sha256={sha256}",
+        support.state,
+        support.note,
+        security_context.process_elevation_level,
+        security_context.integrity_level,
+        security_context.se_debug_privilege
     );
 }
 

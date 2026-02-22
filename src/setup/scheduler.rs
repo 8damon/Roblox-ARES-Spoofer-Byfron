@@ -11,19 +11,6 @@ use windows::core::Result;
 const TASK_NAME: &str = "ARESRS-Startup";
 const TASK_AUTHOR: &str = "ARESRS";
 
-fn ArCurrentTaskUser() -> Option<String> {
-    let username = std::env::var("USERNAME").ok()?;
-    if username.trim().is_empty() {
-        return None;
-    }
-
-    let domain = std::env::var("USERDOMAIN").ok();
-    match domain {
-        Some(d) if !d.trim().is_empty() => Some(format!("{d}\\{username}")),
-        _ => Some(username),
-    }
-}
-
 pub fn ArSyncStartupTask(enable: bool) {
     if enable {
         if let Err(e) = ArTaskInstall() {
@@ -61,10 +48,6 @@ pub fn ArTaskInstall() -> Result<()> {
             reg_info.SetAuthor(&windows::core::BSTR::from(TASK_AUTHOR))?;
 
             let principal = task_def.Principal()?;
-            let task_user = ArCurrentTaskUser().map(windows::core::BSTR::from);
-            if let Some(user) = task_user.as_ref() {
-                principal.SetUserId(user)?;
-            }
             principal.SetLogonType(TASK_LOGON_INTERACTIVE_TOKEN)?;
             principal.SetRunLevel(TASK_RUNLEVEL_HIGHEST)?;
 
@@ -77,9 +60,6 @@ pub fn ArTaskInstall() -> Result<()> {
             let triggers = task_def.Triggers()?;
             let trigger = triggers.Create(TASK_TRIGGER_LOGON)?;
             let logon: ILogonTrigger = trigger.cast()?;
-            if let Some(user) = task_user.as_ref() {
-                logon.SetUserId(user)?;
-            }
             logon.SetEnabled(VARIANT_BOOL::from(true))?;
 
             let exe = std::env::current_exe()?;
@@ -99,10 +79,7 @@ pub fn ArTaskInstall() -> Result<()> {
                 &task_name,
                 &task_def,
                 TASK_CREATE_OR_UPDATE.0,
-                &task_user
-                    .as_ref()
-                    .map(|u| VARIANT::from(u.clone()))
-                    .unwrap_or_default(),
+                &empty,
                 &empty,
                 TASK_LOGON_INTERACTIVE_TOKEN,
                 &empty,

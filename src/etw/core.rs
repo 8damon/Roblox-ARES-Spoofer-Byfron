@@ -7,7 +7,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
-use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, WIN32_ERROR};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, WIN32_ERROR};
 use windows::Win32::System::Diagnostics::Etw::CONTROLTRACE_HANDLE;
 use windows::Win32::System::Diagnostics::Etw::{
     CloseTrace, ControlTraceW, ENABLE_TRACE_PARAMETERS, ENABLE_TRACE_PARAMETERS_VERSION,
@@ -28,6 +28,11 @@ use windows::core::{GUID, PCWSTR, PWSTR};
 use tracing::{debug, error, info, trace, warn};
 
 use super::types::{RobloxAlert, RobloxExe, RobloxInstance};
+
+fn format_win32_status(status: WIN32_ERROR) -> String {
+    let io_err = io::Error::from_raw_os_error(status.0 as i32);
+    format!("{} ({})", status.0, io_err)
+}
 
 pub struct ArEtwSubsystem {
     watcher: Option<RobloxEtwWatcher>,
@@ -120,7 +125,9 @@ impl Drop for RobloxEtwWatcher {
     fn drop(&mut self) {
         info!("ETW watcher stopping");
         self.stop.store(true, Ordering::SeqCst);
-        let _ = self.session.stop();
+        if let Err(e) = self.session.stop() {
+            warn!("ETW session stop during watcher drop failed: {e}");
+        }
         if let Some(h) = self.worker.take() {
             let _ = h.join();
         }
@@ -265,33 +272,69 @@ impl EtwSession {
 
             name_ptr.copy_from_nonoverlapping(name_w.as_ptr(), name_w.len());
 
-            let _ = ControlTraceW(
+            let pre_stop_status = ControlTraceW(
                 CONTROLTRACE_HANDLE { Value: 0 },
                 PCWSTR(name_ptr),
                 props,
                 EVENT_TRACE_CONTROL_STOP,
             );
+            let preexisting_session_detected = pre_stop_status == WIN32_ERROR(0);
+            info!(
+                session_name = %name,
+                pre_stop_control_trace_result = pre_stop_status.0,
+                pre_stop_control_trace_status = %format_win32_status(pre_stop_status),
+                preexisting_session_detected,
+                "ETW pre-start ControlTraceW probe complete"
+            );
 
             let mut handle = CONTROLTRACE_HANDLE::default();
 
-            let mut status = StartTraceW(&mut handle, PCWSTR(name_ptr), props);
+            let mut start_status = StartTraceW(&mut handle, PCWSTR(name_ptr), props);
+            let mut killed_existing_session = preexisting_session_detected;
+            info!(
+                session_name = %name,
+                start_tracew_result = start_status.0,
+                start_tracew_status = %format_win32_status(start_status),
+                "ETW StartTraceW returned"
+            );
 
-            if status == WIN32_ERROR(ERROR_ALREADY_EXISTS.0) {
+            if start_status == WIN32_ERROR(ERROR_ALREADY_EXISTS.0) {
                 warn!("ETW session already exists; stopping previous session");
-                let _ = ControlTraceW(
+                let stop_existing_status = ControlTraceW(
                     CONTROLTRACE_HANDLE { Value: 0 },
                     PCWSTR(name_ptr),
                     props,
                     EVENT_TRACE_CONTROL_STOP,
                 );
-                status = StartTraceW(&mut handle, PCWSTR(name_ptr), props);
+                killed_existing_session = stop_existing_status == WIN32_ERROR(0);
+                info!(
+                    session_name = %name,
+                    stop_existing_control_trace_result = stop_existing_status.0,
+                    stop_existing_control_trace_status = %format_win32_status(stop_existing_status),
+                    killed_existing_session,
+                    "ETW existing session stop attempt complete"
+                );
+                start_status = StartTraceW(&mut handle, PCWSTR(name_ptr), props);
+                info!(
+                    session_name = %name,
+                    start_tracew_retry_result = start_status.0,
+                    start_tracew_retry_status = %format_win32_status(start_status),
+                    "ETW StartTraceW retry returned"
+                );
             }
 
-            if status != WIN32_ERROR(0) {
-                error!("StartTraceW failed: {:?}", status);
+            if start_status != WIN32_ERROR(0) {
+                error!(
+                    session_name = %name,
+                    start_tracew_result = start_status.0,
+                    start_tracew_status = %format_win32_status(start_status),
+                    preexisting_session_detected,
+                    killed_existing_session,
+                    "StartTraceW failed"
+                );
                 return Err(io::Error::other(format!(
-                    "StartTraceW failed: {:?}",
-                    status
+                    "StartTraceW failed: {}",
+                    format_win32_status(start_status)
                 )));
             }
 
@@ -302,7 +345,7 @@ impl EtwSession {
                 ..Default::default()
             };
 
-            let status = EnableTraceEx2(
+            let enable_status = EnableTraceEx2(
                 handle,
                 &provider,
                 EVENT_CONTROL_CODE_ENABLE_PROVIDER.0,
@@ -312,18 +355,43 @@ impl EtwSession {
                 0,
                 Some(&params),
             );
+            info!(
+                session_name = %name,
+                enable_trace_ex2_result = enable_status.0,
+                enable_trace_ex2_status = %format_win32_status(enable_status),
+                preexisting_session_detected,
+                killed_existing_session,
+                "EnableTraceEx2 returned"
+            );
 
-            if status != WIN32_ERROR(0) {
-                error!("EnableTraceEx2 failed: {:?}", status);
-                let _ = ControlTraceW(handle, PCWSTR(name_ptr), props, EVENT_TRACE_CONTROL_STOP);
+            if enable_status != WIN32_ERROR(0) {
+                error!(
+                    session_name = %name,
+                    enable_trace_ex2_result = enable_status.0,
+                    enable_trace_ex2_status = %format_win32_status(enable_status),
+                    "EnableTraceEx2 failed"
+                );
+                let stop_on_error_status =
+                    ControlTraceW(handle, PCWSTR(name_ptr), props, EVENT_TRACE_CONTROL_STOP);
+                warn!(
+                    session_name = %name,
+                    stop_on_error_result = stop_on_error_status.0,
+                    stop_on_error_status = %format_win32_status(stop_on_error_status),
+                    "ControlTraceW stop issued after EnableTraceEx2 failure"
+                );
 
                 return Err(io::Error::other(format!(
-                    "EnableTraceEx2 failed: {:?}",
-                    status
+                    "EnableTraceEx2 failed: {}",
+                    format_win32_status(enable_status)
                 )));
             }
 
-            info!("ETW session started");
+            info!(
+                session_name = %name,
+                preexisting_session_detected,
+                killed_existing_session,
+                "ETW session started"
+            );
             Ok(Self { name_w, handle })
         }
     }
@@ -353,12 +421,23 @@ impl EtwSession {
 
             name_ptr.copy_from_nonoverlapping(self.name_w.as_ptr(), self.name_w.len());
 
-            let _ = ControlTraceW(
+            let stop_status = ControlTraceW(
                 self.handle,
                 PCWSTR(name_ptr),
                 props,
                 EVENT_TRACE_CONTROL_STOP,
             );
+            info!(
+                stop_control_trace_result = stop_status.0,
+                stop_control_trace_status = %format_win32_status(stop_status),
+                "ControlTraceW stop returned"
+            );
+            if stop_status != WIN32_ERROR(0) {
+                return Err(io::Error::other(format!(
+                    "ControlTraceW stop failed: {}",
+                    format_win32_status(stop_status)
+                )));
+            }
 
             info!("ETW session stopped");
             Ok(())
@@ -391,22 +470,47 @@ impl EtwConsumer {
 
             let trace_handle = OpenTraceW(&mut log);
             if trace_handle.Value == u64::MAX {
-                error!("OpenTraceW failed");
-                return Err(io::Error::other("OpenTraceW failed"));
-            }
-
-            let _ = stop;
-            let status = ProcessTrace(&[trace_handle], None, None);
-            if status != WIN32_ERROR(0) {
-                let _ = CloseTrace(trace_handle);
-                error!("ProcessTrace failed: {:?}", status);
+                let open_err = GetLastError();
+                error!(
+                    open_tracew_result = open_err.0,
+                    open_tracew_status = %format_win32_status(open_err),
+                    "OpenTraceW failed"
+                );
                 return Err(io::Error::other(format!(
-                    "ProcessTrace failed: {:?}",
-                    status
+                    "OpenTraceW failed: {}",
+                    format_win32_status(open_err)
                 )));
             }
+            info!(open_tracew_result = 0, "OpenTraceW succeeded");
 
-            let _ = CloseTrace(trace_handle);
+            let _ = stop;
+            let process_status = ProcessTrace(&[trace_handle], None, None);
+            if process_status != WIN32_ERROR(0) {
+                let close_status = CloseTrace(trace_handle);
+                error!(
+                    process_trace_result = process_status.0,
+                    process_trace_status = %format_win32_status(process_status),
+                    close_trace_result = close_status.0,
+                    close_trace_status = %format_win32_status(close_status),
+                    "ProcessTrace failed"
+                );
+                return Err(io::Error::other(format!(
+                    "ProcessTrace failed: {}",
+                    format_win32_status(process_status)
+                )));
+            }
+            info!(
+                process_trace_result = process_status.0,
+                process_trace_status = %format_win32_status(process_status),
+                "ProcessTrace returned"
+            );
+
+            let close_status = CloseTrace(trace_handle);
+            info!(
+                close_trace_result = close_status.0,
+                close_trace_status = %format_win32_status(close_status),
+                "CloseTrace returned"
+            );
             info!("ETW consumer stopped");
             Ok(())
         }

@@ -28,7 +28,7 @@ use crate::{
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 pub struct TrsEngine {
     cfg: ArConfig,
@@ -98,6 +98,10 @@ impl TrsEngine {
             },
             "Runtime config snapshot"
         );
+        info!(
+            mode = Self::mode_name(&self.mode),
+            "Execution mode resolved"
+        );
 
         if matches!(self.mode, ExecutionMode::OneShot) {
             info!("Mode: OneShot");
@@ -157,6 +161,7 @@ impl TrsEngine {
     //
 
     fn execute_full_cycle(&mut self) {
+        let cycle_started = Instant::now();
         self.generation = self.generation.saturating_add(1);
         info!(generation = self.generation, "Started new spoof generation");
 
@@ -176,15 +181,26 @@ impl TrsEngine {
         self.cooldown_until = Some(now + Self::POST_SPOOF_COOLDOWN);
         self.installer_fence_until = Some(now + Self::INSTALLER_FENCE_DURATION);
         self.installer_spawn_pid = None;
+        info!(
+            generation = self.generation,
+            elapsed_ms = cycle_started.elapsed().as_millis(),
+            "Spoof generation cycle complete"
+        );
     }
 
     fn execute_startup_hwid_cycle(&mut self) {
+        let cycle_started = Instant::now();
         self.generation = self.generation.saturating_add(1);
         info!(
             generation = self.generation,
             "Startup boot detected: running HWID-only spoof cycle (no cleaner/reinstall)"
         );
         self.run_spoof_pipeline();
+        info!(
+            generation = self.generation,
+            elapsed_ms = cycle_started.elapsed().as_millis(),
+            "Startup HWID-only spoof cycle complete"
+        );
     }
 
     //
@@ -196,18 +212,23 @@ impl TrsEngine {
             Ok((subsystem, rx)) => {
                 self.etw_rx = Some(rx);
                 self.etw_subsystem = Some(subsystem);
+                info!("ETW subsystem bound to engine");
             }
-            Err(e) => warn!("ETW subsystem failed: {e}"),
+            Err(e) => warn!(error = %e, "ETW subsystem failed"),
         }
     }
 
     fn update_check(&self) -> bool {
+        debug!("Starting update check");
         match ArCheckForUpdates(&self.cfg) {
             Ok(UpdateResult::UpdateStaged) => {
                 info!("Update staged, exiting");
                 true
             }
-            Ok(_) => false,
+            Ok(_) => {
+                debug!("Update check completed: no staged update");
+                false
+            }
             Err(e) => {
                 warn!("Update check error: {e}");
                 false
@@ -230,15 +251,23 @@ impl TrsEngine {
 
     fn run_spoof_pipeline(&self) {
         info!("Running spoof pipeline");
+        let pipeline_started = Instant::now();
         let pre_state = ArCaptureSpoofState();
 
+        debug!("Spoof phase: WMI");
         ArSpoofWMI();
+        debug!("Spoof phase: registry");
         ArSpoofRegistry();
         let pre_mac_network = ArCaptureActiveNetworkSnapshot();
+        debug!(
+            spoof_connected_adapters = self.cfg.spoofing.spoof_connected_adapters,
+            "Spoof phase: MAC"
+        );
         ArSpoofMAC(self.cfg.spoofing.spoof_connected_adapters);
         if let Some(pre) = pre_mac_network.as_ref() {
             let _ = ArVerifyNetworkPreservedAfterMacSpoof(pre, Self::NETWORK_VERIFY_WAIT);
         }
+        debug!("Spoof phase: verification");
         let report = ArVerifySpoofApplied(&pre_state);
         info!(
             machine_guid_changed = report.machine_guid_changed,
@@ -248,7 +277,10 @@ impl TrsEngine {
             "Post-spoof verification report"
         );
 
-        info!("Spoof pipeline complete");
+        info!(
+            elapsed_ms = pipeline_started.elapsed().as_millis(),
+            "Spoof pipeline complete"
+        );
     }
 
     fn install(&mut self) {
@@ -328,7 +360,10 @@ impl TrsEngine {
                 }
                 Ok(_) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    warn!("ETW channel disconnected; background loop exiting");
+                    break;
+                }
             }
 
             self.update_window_observations();
@@ -595,6 +630,7 @@ impl TrsEngine {
 
     fn should_run_on_startup(&self) -> bool {
         if !self.cfg.runtime.run_on_startup {
+            debug!("Startup-only cycle disabled by configuration");
             return false;
         }
 
@@ -602,7 +638,14 @@ impl TrsEngine {
 
         let uptime_ms = unsafe { GetTickCount64() };
 
-        uptime_ms < 120_000
+        let startup_boot = uptime_ms < 120_000;
+        info!(
+            uptime_ms,
+            startup_boot,
+            threshold_ms = 120_000u64,
+            "Startup boot classifier evaluated"
+        );
+        startup_boot
     }
 
     fn resolve_mode(cfg: &ArConfig) -> ExecutionMode {
@@ -617,6 +660,15 @@ impl TrsEngine {
             }
         } else {
             ExecutionMode::Normal
+        }
+    }
+
+    fn mode_name(mode: &ExecutionMode) -> &'static str {
+        match mode {
+            ExecutionMode::OneShot => "OneShot",
+            ExecutionMode::BackgroundSilent => "BackgroundSilent",
+            ExecutionMode::BackgroundNotify => "BackgroundNotify",
+            ExecutionMode::Normal => "Normal",
         }
     }
 }

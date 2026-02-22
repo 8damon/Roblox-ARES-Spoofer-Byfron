@@ -20,9 +20,14 @@ use crate::{
 };
 
 use std::ffi::c_void;
-use tracing::error;
-use windows::Win32::Foundation::HINSTANCE;
+use std::time::{Duration, Instant};
+use tracing::{error, info, warn};
+use windows::Win32::Foundation::{CloseHandle, HINSTANCE};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+};
 use windows::Win32::System::Console::{AllocConsole, SetConsoleTitleW};
+use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
 use windows::core::PCWSTR;
 
 #[unsafe(no_mangle)]
@@ -83,6 +88,7 @@ pub(crate) fn ArRunConfiguredEngine(cfg: ArConfig) {
         ArSetConsoleTracingAnsi(true);
     }
     ArTracing();
+    ArEnforceSingleInstance();
 
     let _veh_guard = components::VEH::ArVehGuard::start();
     let _perf_monitor = components::performance::ArPerformanceMonitor::start();
@@ -102,5 +108,116 @@ fn ArAttachRuntimeConsole() {
         let _ = AllocConsole();
         let title: Vec<u16> = "TRS Runtime Logs".encode_utf16().chain(Some(0)).collect();
         let _ = SetConsoleTitleW(PCWSTR(title.as_ptr()));
+    }
+}
+
+fn ArEnforceSingleInstance() {
+    let current_pid = std::process::id();
+    let image_name = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .unwrap_or_else(|| "aresrs.exe".to_string());
+
+    let initial_targets = ArListOtherProcessIdsByImageName(&image_name, current_pid);
+    if initial_targets.is_empty() {
+        info!(
+            current_pid,
+            image_name = %image_name,
+            "Single-instance guard: no existing instances detected"
+        );
+        return;
+    }
+
+    info!(
+        current_pid,
+        image_name = %image_name,
+        target_count = initial_targets.len(),
+        target_pids = ?initial_targets,
+        "Single-instance guard: terminating existing instances"
+    );
+
+    let mut termination_failed = Vec::new();
+    for pid in &initial_targets {
+        unsafe {
+            match OpenProcess(PROCESS_TERMINATE, false, *pid) {
+                Ok(h) => {
+                    let terminate_ok = TerminateProcess(h, 0).is_ok();
+                    let _ = CloseHandle(h);
+                    if !terminate_ok {
+                        termination_failed.push(*pid);
+                    }
+                }
+                Err(_) => termination_failed.push(*pid),
+            }
+        }
+    }
+
+    let wait_deadline = Instant::now() + Duration::from_secs(6);
+    let mut survivors = initial_targets.clone();
+    while Instant::now() < wait_deadline {
+        survivors = ArListOtherProcessIdsByImageName(&image_name, current_pid)
+            .into_iter()
+            .filter(|pid| initial_targets.contains(pid))
+            .collect();
+        if survivors.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+
+    if !termination_failed.is_empty() || !survivors.is_empty() {
+        warn!(
+            current_pid,
+            image_name = %image_name,
+            termination_failed = ?termination_failed,
+            survivors = ?survivors,
+            "Single-instance guard completed with unresolved processes"
+        );
+    } else {
+        info!(
+            current_pid,
+            image_name = %image_name,
+            terminated_pids = ?initial_targets,
+            "Single-instance guard completed successfully"
+        );
+    }
+}
+
+fn ArListOtherProcessIdsByImageName(image_name: &str, current_pid: u32) -> Vec<u32> {
+    unsafe {
+        let snapshot = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+
+        let mut matches = Vec::new();
+
+        if Process32FirstW(snapshot, &mut entry).is_ok() {
+            loop {
+                let end = entry
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                let name = String::from_utf16_lossy(&entry.szExeFile[..end]);
+                let pid = entry.th32ProcessID;
+
+                if pid != current_pid && name.eq_ignore_ascii_case(image_name) {
+                    matches.push(pid);
+                }
+
+                if Process32NextW(snapshot, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+
+        let _ = CloseHandle(snapshot);
+        matches
     }
 }

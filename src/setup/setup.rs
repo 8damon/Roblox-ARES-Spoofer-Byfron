@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::scheduler::{ArStartStartupTaskNow, ArSyncStartupTask};
 use windows::Win32::System::Console::{AllocConsole, FreeConsole, SetConsoleTitleW};
@@ -130,8 +130,17 @@ fn default_true() -> bool {
 
 pub fn ArRunSetup() -> io::Result<ArConfig> {
     let config_path = config_path_next_to_exe()?;
+    info!(config_path = %config_path.to_string_lossy(), "Setup/config bootstrap started");
 
     let mut config = load_or_create_config(&config_path)?;
+    info!(
+        completed_setup = config.general.completed_setup,
+        require_rerun_after_setup = config.general.require_rerun_after_setup,
+        run_on_startup = config.runtime.run_on_startup,
+        run_in_background = config.runtime.run_in_background,
+        spoof_on_file_run = config.runtime.spoof_on_file_run,
+        "Configuration loaded"
+    );
     let mut ran_setup_wizard = false;
 
     if !config.general.completed_setup {
@@ -167,6 +176,7 @@ pub fn ArRunSetup() -> io::Result<ArConfig> {
     if ran_setup_wizard {
         sync_startup_task_if_needed(&config);
         if config.runtime.run_in_background {
+            info!("Setup requested immediate background startup task run");
             ArStartStartupTaskNow();
         }
         return Ok(config);
@@ -178,10 +188,12 @@ pub fn ArRunSetup() -> io::Result<ArConfig> {
     if config.general.require_rerun_after_setup {
         config.general.require_rerun_after_setup = false;
         config_changed = true;
+        info!("Cleared require_rerun_after_setup after successful rerun");
     }
 
     if config_changed {
         save_config(&config_path, &config)?;
+        info!(config_path = %config_path.to_string_lossy(), "Persisted normalized configuration");
     }
 
     Ok(config)
@@ -199,16 +211,28 @@ fn load_or_create_config(path: &Path) -> io::Result<ArConfig> {
     if !path.exists() {
         let default = ArConfig::default();
         save_config(path, &default)?;
+        info!(config_path = %path.to_string_lossy(), "Created default configuration file");
         return Ok(default);
     }
 
     let content = fs::read_to_string(path)?;
-    let cfg = toml::from_str(&content).unwrap_or_else(|_| ArConfig::default());
+    let cfg = match toml::from_str(&content) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            warn!(
+                config_path = %path.to_string_lossy(),
+                error = %e,
+                "Failed to parse configuration file, using defaults"
+            );
+            ArConfig::default()
+        }
+    };
     Ok(cfg)
 }
 
 fn save_config(path: &Path, cfg: &ArConfig) -> io::Result<()> {
     let toml = toml::to_string_pretty(cfg).unwrap();
+    debug!(config_path = %path.to_string_lossy(), "Saving configuration file");
     fs::write(path, toml)
 }
 
@@ -230,10 +254,17 @@ fn enforce_mode_exclusivity(cfg: &mut ArConfig) -> bool {
 
 fn sync_startup_task_if_needed(cfg: &ArConfig) {
     if cfg.runtime.spoof_on_file_run {
+        info!("Skipping startup task sync because mode is SPOOF_ON_FILE_RUN");
         return;
     }
 
     let enable_startup = cfg.runtime.run_in_background || cfg.runtime.run_on_startup;
+    info!(
+        enable_startup,
+        run_in_background = cfg.runtime.run_in_background,
+        run_on_startup = cfg.runtime.run_on_startup,
+        "Syncing startup scheduled task state"
+    );
     ArSyncStartupTask(enable_startup);
 }
 
