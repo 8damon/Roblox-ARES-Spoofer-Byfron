@@ -115,6 +115,29 @@ For prebuilt binaries (.exe's) you can find them in the **[ARES Discord](https:/
 
 *PDB's are provided.*
 
+## GUIDE
+
+Prior note, you should be using Web-Roblox, NOT the app, this will log you out of the app each time it spoofs.
+
+Spoofer works by waiting for you to close Roblox then spoofing *afterwards*, if on automatic mode it will do **nothing** when you start it, it is meant to run in the background till Roblox closes. 
+
+### Automatic Mode
+1. Download & unzip
+2. Run ``aresrs.exe`` in /WIN_x64_RELEASE as Administrator
+3. Go through setup config
+4. When setup is done, verify ``aresrs.exe`` is running in *Task Manager*
+
+### Manual Mode
+1. Download & unzip
+2. Run ``aresrs.exe`` in /WIN_x64_RELEASE as Administrator
+3. Go through setup config
+4. When setup is done, re-run ``aresrs.exe`` as Administrator to spoof
+
+
+After setup it is required to either **restart your device** or **go into task-scheduler & run "ARESRS-Startup" manually.**
+
+This build is **stable**, if any bugs occur, the spoofer provides logs at `%LOCALAPPDATA%\TSTS`, which you can filter by modification-date & provide to me.
+
 ### COMPILING
 
 I do not reccomend this unless you are a developer or a contributor
