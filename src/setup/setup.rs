@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use super::scheduler::ArSyncStartupTask;
+use super::scheduler::{ArStartStartupTaskNow, ArSyncStartupTask};
 use windows::Win32::System::Console::{AllocConsole, FreeConsole, SetConsoleTitleW};
 use windows::core::PCWSTR;
 
@@ -153,21 +153,27 @@ pub fn ArRunSetup() -> io::Result<ArConfig> {
         println!("1) Open `{}`", config_path.to_string_lossy());
         println!("2) Change `completed_setup = true` to `completed_setup = false`");
         println!("3) Re-run this file to start the setup wizard again");
-        println!("Please re-run this file now to start the actual program.\n");
+        if config.runtime.run_in_background {
+            println!("Background mode will be started automatically after setup exits.");
+            println!("You do not need to re-run this file.\n");
+        } else {
+            println!("Please re-run this file now to start the actual program.\n");
+        }
         pause_before_exit()?;
         info!("Setup completed");
         detach_setup_console();
     }
 
     if ran_setup_wizard {
-        let enable_startup = config.runtime.run_in_background || config.runtime.run_on_startup;
-        ArSyncStartupTask(enable_startup);
+        sync_startup_task_if_needed(&config);
+        if config.runtime.run_in_background {
+            ArStartStartupTaskNow();
+        }
         return Ok(config);
     }
 
     let mut config_changed = enforce_mode_exclusivity(&mut config);
-    let enable_startup = config.runtime.run_in_background || config.runtime.run_on_startup;
-    ArSyncStartupTask(enable_startup);
+    sync_startup_task_if_needed(&config);
 
     if config.general.require_rerun_after_setup {
         config.general.require_rerun_after_setup = false;
@@ -212,13 +218,23 @@ fn enforce_mode_exclusivity(cfg: &mut ArConfig) -> bool {
     {
         println!("SPOOF_ON_FILE_RUN cannot be combined with background/startup modes.");
         warn!(
-            "SPOOF_ON_FILE_RUN conflicted with background/startup; prioritizing background/startup and disabling SPOOF_ON_FILE_RUN"
+            "SPOOF_ON_FILE_RUN conflicted with background/startup; prioritizing SPOOF_ON_FILE_RUN and disabling background/startup modes"
         );
-        cfg.runtime.spoof_on_file_run = false;
+        cfg.runtime.run_in_background = false;
+        cfg.runtime.run_on_startup = false;
         return true;
     }
 
     false
+}
+
+fn sync_startup_task_if_needed(cfg: &ArConfig) {
+    if cfg.runtime.spoof_on_file_run {
+        return;
+    }
+
+    let enable_startup = cfg.runtime.run_in_background || cfg.runtime.run_on_startup;
+    ArSyncStartupTask(enable_startup);
 }
 
 fn run_setup_questions(cfg: &mut ArConfig) -> io::Result<()> {

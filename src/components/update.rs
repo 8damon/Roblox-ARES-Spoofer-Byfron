@@ -6,7 +6,7 @@ use std::process::Command;
 
 use crate::setup::setup::ArConfig;
 
-const TRUSTED_REPO_GIT: &str = "8damon/TITAN-Spoofer.git";
+const TRUSTED_REPO_GIT: &str = "8damon/Roblox-ARES-Spoofer-Byfron.git";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateResult {

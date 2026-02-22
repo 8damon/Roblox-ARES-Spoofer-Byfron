@@ -34,6 +34,12 @@ pub fn ArSyncStartupTask(enable: bool) {
     }
 }
 
+pub fn ArStartStartupTaskNow() {
+    if let Err(e) = ArTaskRunNow() {
+        warn!("Failed to start startup scheduled task immediately: {e}");
+    }
+}
+
 pub fn ArTaskInstall() -> Result<()> {
     unsafe {
         let initialized = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
@@ -129,6 +135,32 @@ pub fn ArTaskUninstall() -> Result<()> {
             let _ = root.DeleteTask(&task_name, 0);
             info!("Startup scheduled task removed");
 
+            Ok(())
+        })();
+
+        if initialized {
+            CoUninitialize();
+        }
+        result
+    }
+}
+
+pub fn ArTaskRunNow() -> Result<()> {
+    unsafe {
+        let initialized = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
+
+        let result = (|| -> Result<()> {
+            let service: ITaskService =
+                CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER)?;
+            let empty = VARIANT::default();
+            service.Connect(&empty, &empty, &empty, &empty)?;
+
+            let root = service.GetFolder(&windows::core::BSTR::from("\\"))?;
+            let task_name = windows::core::BSTR::from(TASK_NAME);
+            let task = root.GetTask(&task_name)?;
+
+            let _ = task.Run(&empty)?;
+            info!("Startup scheduled task started immediately");
             Ok(())
         })();
 

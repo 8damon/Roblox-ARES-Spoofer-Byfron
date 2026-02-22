@@ -30,14 +30,28 @@ struct FileMakeWriter {
     file: Arc<Mutex<File>>,
 }
 
+#[derive(Clone, Copy)]
+struct ConsoleMakeWriter {
+    strip_ansi: bool,
+}
+
 struct FileWriter {
     file: Arc<Mutex<File>>,
 }
 
+struct ConsoleWriter {
+    strip_ansi: bool,
+}
+
 static MUTE_CONSOLE_TRACING: AtomicBool = AtomicBool::new(false);
+static CONSOLE_ANSI_TRACING: AtomicBool = AtomicBool::new(true);
 
 pub fn ArSetConsoleTracingMuted(muted: bool) {
     MUTE_CONSOLE_TRACING.store(muted, Ordering::Relaxed);
+}
+
+pub fn ArSetConsoleTracingAnsi(enabled: bool) {
+    CONSOLE_ANSI_TRACING.store(enabled, Ordering::Relaxed);
 }
 
 impl<'a> MakeWriter<'a> for FileMakeWriter {
@@ -64,6 +78,57 @@ impl Write for FileWriter {
         }
         Ok(())
     }
+}
+
+impl<'a> MakeWriter<'a> for ConsoleMakeWriter {
+    type Writer = ConsoleWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        ConsoleWriter {
+            strip_ansi: self.strip_ansi,
+        }
+    }
+}
+
+impl Write for ConsoleWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut stdout = io::stdout();
+        if self.strip_ansi {
+            let stripped = strip_ansi_escape_sequences(buf);
+            stdout.write_all(&stripped)?;
+        } else {
+            stdout.write_all(buf)?;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        io::stdout().flush()
+    }
+}
+
+fn strip_ansi_escape_sequences(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len());
+    let mut i = 0usize;
+
+    while i < input.len() {
+        if input[i] == 0x1B && i + 1 < input.len() && input[i + 1] == b'[' {
+            i += 2;
+            while i < input.len() {
+                let b = input[i];
+                i += 1;
+                if (0x40..=0x7E).contains(&b) {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        out.push(input[i]);
+        i += 1;
+    }
+
+    out
 }
 
 fn init_log_file() -> Option<Arc<Mutex<File>>> {
@@ -100,6 +165,7 @@ pub fn ArTracing() {
 
     let timer = ChronoLocal::new("%Y-%m-%d %H:%M:%S".to_string());
     let no_console = MUTE_CONSOLE_TRACING.load(Ordering::Relaxed);
+    let console_ansi = CONSOLE_ANSI_TRACING.load(Ordering::Relaxed);
 
     if let Some(file) = init_log_file() {
         if no_console {
@@ -120,7 +186,7 @@ pub fn ArTracing() {
                 .init();
         } else {
             let stdout_layer = fmt::layer()
-                .with_ansi(true)
+                .with_ansi(console_ansi)
                 .with_target(true)
                 .with_file(true)
                 .with_line_number(true)
@@ -128,7 +194,9 @@ pub fn ArTracing() {
                 .with_thread_names(true)
                 .with_level(true)
                 .with_timer(timer.clone())
-                .with_writer(io::stdout);
+                .with_writer(ConsoleMakeWriter {
+                    strip_ansi: !console_ansi,
+                });
             let file_layer = fmt::layer()
                 .with_ansi(false)
                 .with_target(true)
@@ -150,7 +218,7 @@ pub fn ArTracing() {
         tracing_subscriber::registry().with(filter).init();
     } else {
         let stdout_layer = fmt::layer()
-            .with_ansi(true)
+            .with_ansi(console_ansi)
             .with_target(true)
             .with_file(true)
             .with_line_number(true)
@@ -158,7 +226,9 @@ pub fn ArTracing() {
             .with_thread_names(true)
             .with_level(true)
             .with_timer(timer)
-            .with_writer(io::stdout);
+            .with_writer(ConsoleMakeWriter {
+                strip_ansi: !console_ansi,
+            });
 
         tracing_subscriber::registry()
             .with(filter)

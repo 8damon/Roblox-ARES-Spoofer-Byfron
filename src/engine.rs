@@ -99,6 +99,12 @@ impl TrsEngine {
             "Runtime config snapshot"
         );
 
+        if matches!(self.mode, ExecutionMode::OneShot) {
+            info!("Mode: OneShot");
+            self.execute_full_cycle();
+            return Ok(());
+        }
+
         self.init_etw();
 
         if self.update_check() {
@@ -111,11 +117,7 @@ impl TrsEngine {
         }
 
         match self.mode {
-            ExecutionMode::OneShot => {
-                info!("Mode: OneShot");
-                self.execute_full_cycle();
-            }
-
+            ExecutionMode::OneShot => unreachable!("OneShot mode exits before background dispatch"),
             ExecutionMode::BackgroundSilent | ExecutionMode::BackgroundNotify => {
                 if self.etw_rx.is_none() {
                     warn!(

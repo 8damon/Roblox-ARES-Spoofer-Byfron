@@ -8,7 +8,7 @@ mod modules;
 mod setup;
 
 use crate::{
-    components::tracing::ArTracing,
+    components::tracing::{ArSetConsoleTracingAnsi, ArTracing},
     modules::{
         PE::headers::{ArWipeHeaders, TRUE},
         clean::kill::ArKillProcess,
@@ -22,6 +22,8 @@ use crate::{
 use std::ffi::c_void;
 use tracing::error;
 use windows::Win32::Foundation::HINSTANCE;
+use windows::Win32::System::Console::{AllocConsole, SetConsoleTitleW};
+use windows::core::PCWSTR;
 
 #[unsafe(no_mangle)]
 unsafe extern "system" fn TSRS_CALLBACK(_hinst: HINSTANCE, reason: u32, _reserved: *mut c_void) {
@@ -36,6 +38,7 @@ static TLS_ENTRY: unsafe extern "system" fn(HINSTANCE, u32, *mut c_void) = TSRS_
 
 fn main() {
     components::tracing::ArSetConsoleTracingMuted(true);
+    ArSetConsoleTracingAnsi(true);
     ArEnsureWorkingDirectoryAtExeDir();
 
     let _ = ArAccessCheck();
@@ -49,7 +52,11 @@ fn main() {
     };
 
     if cfg.general.require_rerun_after_setup {
-        eprintln!("Setup finished. Re-run this executable to continue.");
+        if cfg.runtime.run_in_background {
+            eprintln!("Setup finished. Background mode was started via scheduled task.");
+        } else {
+            eprintln!("Setup finished. Re-run this executable to continue.");
+        }
         std::process::exit(0);
     }
 
@@ -67,7 +74,14 @@ fn ArEnsureWorkingDirectoryAtExeDir() {
 }
 
 pub(crate) fn ArRunConfiguredEngine(cfg: ArConfig) {
-    components::tracing::ArSetConsoleTracingMuted(false);
+    if cfg.runtime.spoof_on_file_run {
+        ArAttachRuntimeConsole();
+        components::tracing::ArSetConsoleTracingMuted(false);
+        ArSetConsoleTracingAnsi(false);
+    } else {
+        components::tracing::ArSetConsoleTracingMuted(true);
+        ArSetConsoleTracingAnsi(true);
+    }
     ArTracing();
 
     let _veh_guard = components::VEH::ArVehGuard::start();
@@ -80,5 +94,13 @@ pub(crate) fn ArRunConfiguredEngine(cfg: ArConfig) {
     if let Err(e) = engine::TrsEngine::new(cfg).run() {
         error!("Engine failure: {e}");
         std::process::exit(1);
+    }
+}
+
+fn ArAttachRuntimeConsole() {
+    unsafe {
+        let _ = AllocConsole();
+        let title: Vec<u16> = "TRS Runtime Logs".encode_utf16().chain(Some(0)).collect();
+        let _ = SetConsoleTitleW(PCWSTR(title.as_ptr()));
     }
 }
