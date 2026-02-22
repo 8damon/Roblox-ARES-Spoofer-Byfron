@@ -23,10 +23,10 @@ use std::ffi::c_void;
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 use windows::Win32::Foundation::{CloseHandle, HINSTANCE};
+use windows::Win32::System::Console::{AllocConsole, SetConsoleTitleW};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
-use windows::Win32::System::Console::{AllocConsole, SetConsoleTitleW};
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
 use windows::core::PCWSTR;
 

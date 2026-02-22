@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 pub fn ensure_mac_randomization(xml: &mut String) -> bool {
     use rand::RngCore;
 

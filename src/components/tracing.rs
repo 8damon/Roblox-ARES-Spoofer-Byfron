@@ -15,7 +15,7 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Security::{
     AdjustTokenPrivileges, GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
-    LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES,
+    LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES,
     TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_QUERY,
     TokenElevation, TokenElevationType, TokenElevationTypeDefault, TokenElevationTypeFull,
     TokenElevationTypeLimited, TokenIntegrityLevel, TokenPrivileges,
@@ -391,8 +391,8 @@ fn query_security_context() -> SecurityContext {
             false
         };
 
-        let process_elevation_level = query_process_elevation_level(token)
-            .unwrap_or_else(|| "unknown".to_string());
+        let process_elevation_level =
+            query_process_elevation_level(token).unwrap_or_else(|| "unknown".to_string());
         let integrity_level = query_integrity_level(token).unwrap_or_else(|| "unknown".to_string());
         let se_debug_privilege = query_se_debug_privilege_level(token, can_adjust_privileges)
             .unwrap_or_else(|| "unknown".to_string());
@@ -568,7 +568,10 @@ fn query_se_debug_privilege_level(
 
     let adjust_err = unsafe { GetLastError() };
     if adjust_result.is_err() {
-        return Some(format!("enable_failed(api_error={})", adjust_result.err()?.code()));
+        return Some(format!(
+            "enable_failed(api_error={})",
+            adjust_result.err()?.code()
+        ));
     }
     if adjust_err == ERROR_NOT_ALL_ASSIGNED {
         return Some("present but not assignable (ERROR_NOT_ALL_ASSIGNED)".to_string());

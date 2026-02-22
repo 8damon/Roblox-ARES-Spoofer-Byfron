@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
@@ -153,10 +155,10 @@ fn disconnect_and_wait(handle: HANDLE, guid: &GUID) -> bool {
     let start = Instant::now();
 
     while start.elapsed() < DISCONNECT_TIMEOUT {
-        if let Some(state) = query_interface_state(handle, guid) {
-            if state != wlan_interface_state_connected {
-                return true;
-            }
+        if let Some(state) = query_interface_state(handle, guid)
+            && state != wlan_interface_state_connected
+        {
+            return true;
         }
         std::thread::sleep(Duration::from_millis(250));
     }
