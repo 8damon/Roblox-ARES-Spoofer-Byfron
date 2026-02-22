@@ -50,8 +50,8 @@ impl ArPerformanceMonitor {
 
         let worker = thread::spawn(move || {
             let pid = unsafe { GetCurrentProcessId() };
-            let mut last_log = Instant::now() - cfg.log_interval;
-            let mut last_trim = Instant::now() - cfg.trim_min_interval;
+            let mut last_log = instant_minus(cfg.log_interval);
+            let mut last_trim = instant_minus(cfg.trim_min_interval);
 
             info!(
                 pid,
@@ -215,4 +215,10 @@ fn read_cpu_counters() -> Option<CpuCounters> {
 
 fn filetime_to_u64(ft: FILETIME) -> u64 {
     ((ft.dwHighDateTime as u64) << 32) | ft.dwLowDateTime as u64
+}
+
+fn instant_minus(duration: Duration) -> Instant {
+    Instant::now()
+        .checked_sub(duration)
+        .unwrap_or_else(Instant::now)
 }
