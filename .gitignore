@@ -12,3 +12,5 @@ Cargo.lock
 .vscode/
 
 Signtool.ps1
+
+*.zip
