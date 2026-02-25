@@ -199,7 +199,7 @@ Contributions are welcome (bugfixes, refactors, docs, CI improvements).
 - Clone:
 
 ```
-git clone https://github.com/8damon/Aoblox-ARES-Spoofer-Byfron.git
+git clone https://github.com/8damon/Roblox-ARES-Spoofer-Byfron.git
 cd Roblox-ARES-Spoofer-Byfron
 ```
 
