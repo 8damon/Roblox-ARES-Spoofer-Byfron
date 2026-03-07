@@ -335,11 +335,8 @@ impl EtwSession {
             let start_props = EtwPropsBuf::realtime(name)?;
             let mut handle = CONTROLTRACE_HANDLE::default();
 
-            let mut start_status = StartTraceW(
-                &mut handle,
-                start_props.name_ptr(),
-                start_props.props_ptr(),
-            );
+            let mut start_status =
+                StartTraceW(&mut handle, start_props.name_ptr(), start_props.props_ptr());
 
             let mut killed_existing_session = preexisting_session_detected;
 
