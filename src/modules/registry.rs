@@ -4,12 +4,13 @@ use std::ptr;
 
 use crate::components::generator::{gen_edid, gen_guid, gen_users};
 use rand::{RngCore, thread_rng};
+use regex::Regex;
 use tracing::{error, info, warn};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE, WIN32_ERROR,
 };
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_BEGIN, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    CreateFileW, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_BEGIN, FILE_SHARE_READ, FILE_SHARE_WRITE,
     GetLogicalDriveStringsW, OPEN_EXISTING, ReadFile, SetFilePointer, WriteFile,
 };
 use windows::Win32::System::IO::DeviceIoControl;
@@ -17,9 +18,9 @@ use windows::Win32::System::Ioctl::{
     FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME, FSCTL_UNLOCK_VOLUME,
 };
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, KEY_WRITE, REG_BINARY, REG_SAM_FLAGS,
-    REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegQueryInfoKeyW,
-    RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_ENUMERATE_SUB_KEYS, KEY_QUERY_VALUE, KEY_READ,
+    KEY_SET_VALUE, KEY_WRITE, REG_BINARY, REG_SAM_FLAGS, REG_SZ, REG_VALUE_TYPE, RegCloseKey,
+    RegDeleteTreeW, RegEnumKeyExW, RegOpenKeyExW, RegQueryInfoKeyW, RegSetValueExW,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
@@ -29,6 +30,15 @@ impl RegKey {
     fn open(path: PCWSTR, sam: REG_SAM_FLAGS) -> Result<Self, WIN32_ERROR> {
         let mut h = HKEY(ptr::null_mut());
         let status = unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, path, None, sam, &mut h) };
+        if status == ERROR_SUCCESS {
+            Ok(RegKey(h))
+        } else {
+            Err(status)
+        }
+    }
+    fn open_current_user(path: PCWSTR, sam: REG_SAM_FLAGS) -> Result<Self, WIN32_ERROR> {
+        let mut h = HKEY(ptr::null_mut());
+        let status = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, path, None, sam, &mut h) };
         if status == ERROR_SUCCESS {
             Ok(RegKey(h))
         } else {
@@ -73,6 +83,11 @@ pub fn ArSpoofRegistry() -> bool {
 
     if let Err(e) = spoof_registered_user() {
         error!("Failed to spoof user info | status={:?}", e);
+        overall_success = false;
+    }
+
+    if let Err(e) = spoof_logged_in_users() {
+        error!("Failed to spoof logged in user info | status={:?}", e);
         overall_success = false;
     }
 
@@ -280,6 +295,117 @@ fn spoof_edid() -> Result<usize, WIN32_ERROR> {
     }
 
     Ok(spoofed_count)
+}
+
+fn spoof_logged_in_users() -> Result<(), WIN32_ERROR> {
+    let login_path =
+        w!("Software\\Roblox\\RobloxStudio\\LoggedInUsersStore\\https:\\www.roblox.com");
+    let key = match RegKey::open_current_user(PCWSTR(login_path.as_ptr()), KEY_SET_VALUE) {
+        Ok(k) => k,
+        Err(e) => {
+            warn!("Cannot open registry key | {:?} → {:?}", login_path, e);
+            return Err(e);
+        }
+    };
+
+    // Roblox Studio uses this value in registry as a placeholder for
+    // non logged in clients:
+    // {"":{"username":"","profilePicUrl":""}};
+    let place_holder = "{\"\":{\"username\":\"\",\"profilePicUrl\":\"\"}}";
+    let wide = place_holder
+        .encode_utf16()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let bytes = unsafe { std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2) };
+
+    if let Err(e) = key.set_value(w!("users"), REG_SZ, bytes) {
+        warn!("Failed to set value | {:?} → {:?}", login_path, e);
+        return Err(e);
+    };
+
+    info!(
+        "Logged in users spoofed | {}",
+        String::from_utf16_lossy(unsafe { login_path.as_wide() })
+    );
+
+    // delete tracking keys
+    let keys_to_delete = [
+        r"^\d+rbxRecentFiles_v03$",
+        r"^rbxRecentRobloxApiGames_v02_\d+$",
+        "RobloxStudioFirstTimeLoggedIn",
+        "RobloxStudioLaunchTrackingGuid",
+        "RobloxStudioMostRecentLogin",
+    ];
+
+    let re_files = Regex::new(keys_to_delete[0]).unwrap();
+    let re_api_games = Regex::new(keys_to_delete[1]).unwrap();
+    let base_path = w!("Software\\Roblox\\RobloxStudio");
+    let delete_key = match RegKey::open_current_user(
+        base_path,
+        REG_SAM_FLAGS(KEY_QUERY_VALUE.0 | KEY_ENUMERATE_SUB_KEYS.0 | KEY_SET_VALUE.0 | DELETE.0),
+    ) {
+        Ok(k) => k,
+        Err(e) => {
+            warn!(
+                "Cannot reopen registry key for deletion | {:?} → {:?}",
+                base_path, e
+            );
+            return Err(e);
+        }
+    };
+
+    let mut to_delete: Vec<String> = vec![];
+    let mut index = 0u32;
+    let mut name_buf = [0u16; 256];
+
+    loop {
+        let mut name_len = name_buf.len() as u32;
+        let ret = unsafe {
+            RegEnumKeyExW(
+                delete_key.0,
+                index,
+                Option::from(PWSTR(name_buf.as_mut_ptr())),
+                &mut name_len,
+                None,
+                Option::from(PWSTR::null()),
+                None,
+                None,
+            )
+        };
+
+        if ret != ERROR_SUCCESS {
+            break;
+        }
+
+        let name = String::from_utf16_lossy(&name_buf[..name_len as usize]);
+
+        let should_delete = re_files.is_match(&name)
+            || re_api_games.is_match(&name)
+            || keys_to_delete[2..].contains(&name.as_str());
+
+        if should_delete {
+            to_delete.push(name);
+        }
+
+        index += 1;
+    }
+
+    if to_delete.is_empty() {
+        info!("No additional keys to delete found.");
+        return Ok(());
+    }
+
+    for name in to_delete {
+        let wide_name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+        let ret = unsafe { RegDeleteTreeW(delete_key.0, PCWSTR(wide_name.as_ptr())) };
+
+        match ret {
+            ERROR_SUCCESS => info!("Deleted registry key: {}", name),
+            e => warn!("Failed to delete key '{}': {:?}", name, e),
+        }
+    }
+
+    Ok(())
 }
 
 #[allow(dead_code)]

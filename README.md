@@ -77,12 +77,18 @@ All of these values have been found checked by Roblox's Anti-Tamper (Hyperion/By
 
 ### Registry Identifiers (via `src/modules/registry.rs`)
 
-| Path                                                            | Description         |
-| --------------------------------------------------------------- | ------------------- |
-| HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid                | Machine GUID        |
-| HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\RegisteredOwner  | Registered owner    |
-| HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\LastLoggedOnUser | Last logged-on user |
-| HKLM\SYSTEM\CurrentControlSet\Enum\DISPLAY......*\EDID          | Monitor EDID blobs  |
+| Path                                                                                               | Description              |
+|----------------------------------------------------------------------------------------------------|--------------------------|
+| HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid                                                   | Machine GUID             |
+| HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\RegisteredOwner                                     | Registered owner         |
+| HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\LastLoggedOnUser                                    | Last logged-on user      |
+| HKLM\SYSTEM\CurrentControlSet\Enum\DISPLAY......*\EDID                                             | Monitor EDID blobs       |
+| HKLM\USER\Software\Roblox\RobloxStudio\LoggedInUsersStore\https:\www.<span></span>roblox.com       | Last Roblox Studio user  |
+| HKLM\USER\Software\Roblox\RobloxStudio\\...rbxRecentFiles_v03                                      | Player ID                |
+| HKLM\USER\Software\Roblox\RobloxStudio\\...rbxRecentRobloxApiGames_v02                             | Monitor EDID blobs       |
+| HKLM\USER\Software\Roblox\RobloxStudio\RobloxStudioFirstTimeLoggedIn                               | Log on Time Information  |
+| HKLM\USER\Software\Roblox\RobloxStudio\RobloxStudioLaunchTrackingGuid                              | Log on GUID              |
+| HKLM\USER\Software\Roblox\RobloxStudio\RobloxStudioMostRecentLogin                                 | Recent Login Information |
 
 ---
 
